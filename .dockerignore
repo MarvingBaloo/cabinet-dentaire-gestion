@@ -1,0 +1,15 @@
+node_modules
+.next
+.git
+.env
+.env.*
+!.env.example
+docker/db.env
+tests
+coverage
+*.tsbuildinfo
+README.md
+ARCHITECTURE.md
+CLAUDE.md
+docs
+prompts-vscode-cabinet-dentaire.md

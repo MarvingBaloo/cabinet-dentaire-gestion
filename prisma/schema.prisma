@@ -1,0 +1,1468 @@
+// Schéma — socle technique (phase 1) et agenda (phase 2).
+// ⚠ La section Agenda introduit la première donnée de santé : le modèle Patient.
+// Toujours hors périmètre : cotation CCAM, FSE, télétransmission (D1).
+//
+// PÉRIMÈTRE : un seul cabinet, deux sites. Pas de couche locataire — voir D3 pour la
+// décision et ce que coûterait un retour en arrière.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Prisma 7 : les URL de connexion ne sont plus dans le schéma.
+//   - migrations  → prisma.config.ts, avec DIRECT_DATABASE_URL (rôle propriétaire)
+//   - exécution   → driver adapter dans src/server/db, avec DATABASE_URL (cabinet_app)
+// Cette séparation, imposée par Prisma, sert exactement la nôtre : il n'existe plus
+// d'endroit où une seule URL servirait aux deux usages.
+datasource db {
+  provider = "postgresql"
+}
+
+enum RoleName {
+  PRATICIEN
+  SECRETAIRE
+  ASSISTANTE
+  ADMIN
+}
+
+// Deux sites, fixes et permanents (D5). L'enum n'est donc pas une contrainte :
+// c'est la réalité du cabinet mise dans le type. La phase 5 (mode hors ligne) ne
+// concerne que MARIE_GALANTE — une chaîne libre y laisserait passer une faute de
+// frappe silencieuse.
+enum SiteCode {
+  GUADELOUPE
+  MARIE_GALANTE
+}
+
+enum AuditAction {
+  READ
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN_SUCCESS
+  LOGIN_FAILURE
+  LOGOUT
+  PERMISSION_DENIED
+  EXPORT
+  // Le second facteur n'a pas pu être envoyé — panne du fournisseur, numéro
+  // absent. Distinct de LOGIN_FAILURE à dessein : le mot de passe était bon, et
+  // la limitation par IP ne doit pas compter ces cas. Tout le cabinet sortant
+  // sur une seule adresse, une panne de SMS y bloquerait tout le monde.
+  SECOND_FACTEUR_INDISPONIBLE
+  // L'accueil (ou un praticien qui n'est pas celui du rendez-vous) demande une
+  // annulation : le rendez-vous passe en ANNULATION_DEMANDEE, en attente du
+  // praticien concerné ou d'un administrateur (D17, retournée le 2026-09-23).
+  ANNULATION_DEMANDEE
+  // Le praticien du rendez-vous, ou un administrateur, valide la demande : le
+  // rendez-vous devient ANNULE, sans manquement (D21 inchangé).
+  ANNULATION_VALIDEE
+  // Refusée : le rendez-vous revient à son statut d'avant la demande, intact.
+  ANNULATION_REFUSEE
+  // Un inscrit de la liste d'attente a reçu (ou aurait dû recevoir) le SMS
+  // d'un créneau libéré (lot D, D29). `succeeded` porte le résultat : abandonné
+  // (créneau repris ou passé) ou réellement parti.
+  //
+  // ⚠ CONSERVÉE MAIS PLUS ÉCRITE (phase 4, lot 1, D37) : depuis la file de
+  // notifications, c'est la table `Notification` qui journalise l'envoi d'un
+  // SMS de liste d'attente — avec plus de détail qu'`audit_log` n'en porte
+  // (fournisseur, référence, crédits, tentatives). Cette valeur reste dans
+  // l'enum parce que des lignes `audit_log` déjà écrites l'utilisent et que le
+  // journal est inaltérable ; aucun code n'en écrit plus de nouvelles.
+  LISTE_ATTENTE_NOTIFIEE
+  // Réponse OUI/NON par SMS au rappel de rendez-vous (phase 4, lot 4, webhook
+  // entrant Brevo — voir `src/app/api/webhooks/brevo/sms/route.ts`). Une ligne
+  // par réponse traitée, qu'elle ait produit un effet (annulation, confirmation)
+  // ou non (délai dépassé, réponse non comprise, sans rendez-vous associé) —
+  // `succeeded`/`deniedReason` distinguent les deux. Jamais le texte du message
+  // ni le numéro complet : `metadata.telephoneMasque` reprend seulement les
+  // derniers chiffres, comme `masquerNumero()` le fait déjà pour le second
+  // facteur (D7).
+  REPONSE_SMS_TRAITEE
+  // Le webhook a refusé la requête avant tout traitement : en-tête
+  // `Authorization` absent, secret invalide, ou corps illisible. Distinct de
+  // `REPONSE_SMS_TRAITEE` : ici, aucune réponse patient n'a été lue.
+  WEBHOOK_REFUSE
+  // Le patient a changé ses préférences de notification par canal (phase 4,
+  // lot 5b, D44) — rappels et/ou messages non essentiels, depuis l'accès
+  // patient (D23). Jamais le numéro complet en métadonnées : `masquerNumero()`,
+  // comme pour le second facteur.
+  PREFERENCES_NOTIFICATION_MODIFIEES
+}
+
+// ─── Implantations ────────────────────────────────────────────────────────────
+
+// Les deux lignes sont semées par migration. Pas d'écran de création de site :
+// il n'y en aura pas de troisième. Une fermeture temporaire (travaux, cyclone) se
+// traite par blocage de créneaux, pas par une bascule sur le site.
+model Site {
+  id        String   @id @default(uuid()) @db.Uuid
+  code      SiteCode @unique
+  nom       String
+  // `null` tant que le cabinet n'a pas donné l'adresse, jamais une chaîne de
+  // remplacement : « À renseigner » finissait AFFICHÉ au patient, sur le portail
+  // comme dans le fichier .ics de son agenda. Le type force chaque écran à
+  // traiter le cas au lieu de le découvrir en production.
+  adresse   String?
+  // Coordonnées pour le lien « voir le plan d'accès » de la page publique du
+  // cabinet (lot E, D34). Même principe que `adresse` : `null` tant que le
+  // cabinet ne les a pas données, jamais une valeur approchée — un lien de
+  // carte à côté d'un patient qui se déplace vraiment ne se devine pas.
+  latitude  Float?
+  longitude Float?
+  // « En activité » (D74). Décoché, le cabinet n'existe plus pour personne : ni sur le site public, ni dans la
+  // réservation, ni dans l'espace du cabinet — administrateur compris, sauf l'écran qui le réactive. Ses
+  // données restent en base. Demandé par la praticienne : Marie-Galante seule la première année.
+  actif     Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users        UserSite[]
+  workstations Workstation[]
+  auditLogs    AuditLog[]
+
+  fauteuils           Fauteuil[]
+  plages              PlageDePresence[]
+  rendezVous          RendezVous[]
+  indisponibilites    Indisponibilite[]
+  notesJour           NoteJour[]
+  semaineType         PresenceHebdomadaire[]
+  exceptionsPresence  ExceptionPresence[]
+  fauteuilsPraticiens FauteuilPraticien[]
+
+  reservations             ReservationPublique[]
+  inscriptionsListeAttente InscriptionListeAttente[]
+  notifications            Notification[]
+
+  @@map("site")
+}
+
+// ─── Identité et droits ───────────────────────────────────────────────────────
+
+// Personnel interne UNIQUEMENT. Les comptes du portail patient sont un modèle
+// distinct, conçu en phase 3 — voir ARCHITECTURE.md (D8).
+model User {
+  id               String    @id @default(uuid()) @db.Uuid
+  email            String    @unique
+  passwordHash     String    @map("password_hash")
+  nom              String
+  prenom           String
+  // Second facteur par code à usage unique envoyé par SMS (D7, révisée le
+  // 2026-09-15). Le numéro remplace le secret TOTP : plus de QR à scanner, plus
+  // d'application à installer — le code arrive au lieu d'être cherché.
+  telephoneMobile  String?   @map("telephone_mobile")
+  mfaEnrolledAt    DateTime? @map("mfa_enrolled_at")
+  actif            Boolean   @default(true) // désactivation, jamais suppression (D9)
+  lastLoginAt      DateTime? @map("last_login_at")
+  failedLoginCount Int       @default(0) @map("failed_login_count")
+  lockedUntil      DateTime? @map("locked_until")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  roles           UserRole[]
+  sites           UserSite[]
+  sessions        Session[]
+  auditLogs       AuditLog[]
+  postesConfiance TrustedWorkstation[]
+
+  // Facultatif dans les deux sens : un praticien remplaçant n'a pas de compte,
+  // une secrétaire n'est pas praticienne.
+  praticien Praticien?
+
+  // Rendez-vous pour lesquels CE compte a demandé une annulation, en attente de
+  // validation par le praticien concerné (D17, retournée le 2026-09-23).
+  demandesAnnulation     RendezVous[]
+  versementsRetrocession VersementRetrocession[]
+
+  // Dernière personne à avoir modifié un modèle de message (lot 5a) — `null`
+  // sur une ligne semée, jamais retouchée.
+  modelesMessagesModifies ModeleMessage[]
+
+  notesJour NoteJour[] @relation("NotesJourAuteur")
+
+  // Le chat interne (D82) : ses conversations (un des deux bouts), ses messages, et son choix de couper le son.
+  conversationsChatA ConversationChat[] @relation("ConversationChatA")
+  conversationsChatB ConversationChat[] @relation("ConversationChatB")
+  messagesChat       MessageChat[]
+  chatSonCoupe       Boolean            @default(false) @map("chat_son_coupe")
+
+  @@map("app_user")
+}
+
+// Référentiel en lecture seule pour l'application : le rendre modifiable en
+// exécution ouvrirait l'escalade de privilèges — se donner une permission.
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        RoleName @unique
+  description String
+
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("role")
+}
+
+model Permission {
+  id       String @id @default(uuid()) @db.Uuid
+  resource String // "agenda", "utilisateur", "audit", "site"
+  action   String // "read", "create", "update", "delete"
+
+  roles RolePermission[]
+
+  @@unique([resource, action])
+  @@map("permission")
+}
+
+// Rôles cumulables : les permissions effectives sont l'union des rôles portés.
+model UserRole {
+  userId String @map("user_id") @db.Uuid
+  roleId String @map("role_id") @db.Uuid
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  @@id([userId, roleId])
+  @@map("user_role")
+}
+
+model RolePermission {
+  roleId       String @map("role_id") @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permission")
+}
+
+// Rattachement d'un membre du personnel à un ou plusieurs sites.
+// EST un filtre de lecture (D5, révisée le 2026-09-10) : on ne voit que les sites
+// auxquels on est rattaché, le rôle global excepté. Une requête d'agenda qui ne
+// filtre pas là-dessus est un défaut de sécurité, pas un oubli d'affichage — et le
+// filtre vit dans la DAL, jamais dans l'écran.
+// ⚠ Ce commentaire disait exactement l'inverse jusqu'au 2026-09-10.
+model UserSite {
+  userId String @map("user_id") @db.Uuid
+  siteId String @map("site_id") @db.Uuid
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  site Site @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  @@id([userId, siteId])
+  @@map("user_site")
+}
+
+// ─── Postes de travail ────────────────────────────────────────────────────────
+
+// Machine physique déclarée une fois par un ADMIN, identifiée par un cookie signé :
+// tous les postes du cabinet sortent sur une seule IP publique (NAT), l'adresse ne
+// distingue donc pas les machines.
+model Workstation {
+  id         String    @id @default(uuid()) @db.Uuid
+  siteId     String?   @map("site_id") @db.Uuid
+  nom        String    @unique // "PC-Accueil", "Portable praticien"
+  secretHash String    @map("secret_hash") // le cookie porte le secret ; seul son hash est stocké
+  actif      Boolean   @default(true)
+  // Reconnu à son navigateur (iPhone, Android mobile) : un téléphone de confiance peut valider une connexion par
+  // QR code (D83).
+  telephone  Boolean   @default(false)
+  lastSeenAt DateTime? @map("last_seen_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  site            Site?                @relation(fields: [siteId], references: [id])
+  sessions        Session[]
+  auditLogs       AuditLog[]
+  postesConfiance TrustedWorkstation[]
+
+  @@map("workstation")
+}
+
+// ─── Postes de confiance ──────────────────────────────────────────────────────
+
+// Dispense du second facteur sur une machine déjà éprouvée (D7quater).
+//
+// La confiance porte sur le COUPLE personne + poste, jamais sur le poste seul :
+// sinon l'enrôlement d'une assistante dispenserait tout le monde de code sur
+// cette machine, y compris quelqu'un ayant volé le mot de passe du praticien.
+model TrustedWorkstation {
+  userId        String   @db.Uuid
+  workstationId String   @db.Uuid
+  trustedUntil  DateTime
+  createdAt     DateTime @default(now())
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workstation Workstation @relation(fields: [workstationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, workstationId])
+  @@index([trustedUntil])
+  @@map("trusted_workstation")
+}
+
+// ─── Sessions ─────────────────────────────────────────────────────────────────
+
+// Sessions en base, pas JWT : un jeton autonome ne se révoque pas, et le
+// verrouillage sur inactivité exige un état serveur. Voir ARCHITECTURE.md (D6).
+model Session {
+  id             String    @id @default(uuid()) @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  workstationId  String?   @map("workstation_id") @db.Uuid
+  sessionToken   String    @unique @map("session_token")
+  mfaValidatedAt DateTime? @map("mfa_validated_at") // une session sans MFA validé n'ouvre aucun droit
+  lastActivityAt DateTime  @default(now()) @map("last_activity_at")
+  expiresAt      DateTime  @map("expires_at")
+  revokedAt      DateTime? @map("revoked_at")
+  ipAddress      String    @map("ip_address")
+  userAgent      String?   @map("user_agent")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  workstation         Workstation?         @relation(fields: [workstationId], references: [id])
+  codeSms             CodeSms?
+  validationTelephone ValidationTelephone?
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("session")
+}
+
+// ─── Journal d'audit ──────────────────────────────────────────────────────────
+
+// Append-only garanti par PostgreSQL (prisma/sql/02_audit_append_only.sql),
+// pas par l'absence de code de suppression.
+//
+// Une ligne = UNE OPÉRATION D'ACCÈS (un appel de la DAL), pas une ligne lue :
+// `itemCount` porte le volume. Une ligne par enregistrement lu rendrait le
+// journal ingérable dès la première vue d'agenda hebdomadaire.
+//
+// `metadata` ne doit JAMAIS contenir de donnée de santé — c'est la voie de fuite
+// la plus probable vers un journal exporté ou moins protégé que sa source.
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  occurredAt DateTime @default(now()) @map("occurred_at")
+
+  actorId    String?    @map("actor_id") @db.Uuid // null : échec de login sur identifiant inconnu
+  actorEmail String?    @map("actor_email") // figé : survit à la désactivation du compte
+  actorRoles RoleName[] @map("actor_roles") // figés au moment de l'action
+
+  action     AuditAction
+  entityType String      @map("entity_type")
+  entityId   String?     @map("entity_id")
+  itemCount  Int?        @map("item_count")
+
+  siteId        String? @map("site_id") @db.Uuid
+  workstationId String? @map("workstation_id") @db.Uuid
+  ipAddress     String  @map("ip_address")
+  userAgent     String? @map("user_agent")
+
+  succeeded    Boolean @default(true)
+  deniedReason String? @map("denied_reason")
+  metadata     Json?
+
+  actor       User?        @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  site        Site?        @relation(fields: [siteId], references: [id])
+  workstation Workstation? @relation(fields: [workstationId], references: [id])
+
+  @@index([occurredAt])
+  @@index([actorId, occurredAt])
+  @@index([entityType, entityId])
+  // Sert la limitation par adresse IP, qui compte les échecs récents d'une même
+  // origine. Sans cet index, chaque tentative de connexion balayerait la plus
+  // grosse table de la base.
+  @@index([ipAddress, occurredAt])
+  @@map("audit_log")
+}
+
+// ─── Agenda (phase 2) ─────────────────────────────────────────────────────────
+//
+// ⚠ Cette section introduit la PREMIÈRE donnée de santé du dépôt : le modèle
+// Patient. Tout ce qui le touche relève de l'hébergement HDS (D2), du chiffrement
+// au repos et du journal d'audit (D9).
+//
+// Hors périmètre ici, et ce n'est pas un oubli (D1) : aucun code d'acte CCAM,
+// aucune base de remboursement, aucun montant conventionné, aucun NIR. Le numéro
+// de sécurité sociale reste en attente d'arbitrage du DPO — l'ajouter coûtera une
+// migration, l'avoir ajouté à tort aussi.
+
+enum StatutRendezVous {
+  A_CONFIRMER
+  CONFIRME
+  SALLE_ATTENTE
+  AU_FAUTEUIL
+  TERMINE
+  // Passage à l'accueil. Ne porte ni montant ni document : c'est une étape de
+  // parcours, pas une facturation (D1).
+  EN_CAISSE
+  ABSENT
+  ANNULE
+  // L'accueil — ou un praticien qui n'est pas celui du rendez-vous — a demandé
+  // l'annulation, en attente que le praticien concerné (ou un administrateur)
+  // valide ou refuse (D17, retournée le 2026-09-23). Le créneau reste occupé :
+  // ce statut n'est NI dans la liste `ANNULE`/`ABSENT` exclue des contraintes de
+  // chevauchement (prisma/sql/03_agenda_contraintes.sql), NI dans les listes
+  // `OCCUPE` qui pilotent les créneaux libres — il y figure par construction.
+  ANNULATION_DEMANDEE
+}
+
+enum TypeIndisponibilite {
+  CONGE
+  // ⚠ Non utilisée par la fermeture automatique des jours fériés (Q29, Q30,
+  // compléments d'agenda lot 2) : celle-ci vit dans `plagesVouluesAvecFeries`
+  // (src/server/domaine/presences.ts), qui ne génère simplement AUCUNE
+  // présence un jour férié — pas de ligne `Indisponibilite` à créer ni à
+  // faire vivre d'une année sur l'autre. Cette valeur reste du schéma d'avant
+  // ce lot ; rien ne la crée aujourd'hui.
+  FERIE
+  PAUSE
+  // Créneau gardé pour les urgences : seuls les motifs marqués `estUrgence`
+  // peuvent s'y poser, jusqu'à sa libération.
+  RESERVE_URGENCE
+  // Fermeture d'un cabinet (travaux, cyclone…) — `siteId` posé, `praticienId`
+  // nul. Distincte d'`AUTRE` pour que l'écran des indisponibilités (lot 2)
+  // affiche une liste lisible au personnel plutôt que tout regrouper sous un
+  // libellé générique ; distincte de `CONGE`, qui vise un praticien, jamais
+  // un site.
+  FERMETURE
+  AUTRE
+}
+
+// Séparé de `User` à dessein. Trois raisons : le portail public lira cette table
+// sans authentification et n'a rien à faire près des condensats de mot de passe ;
+// un remplaçant doit pouvoir figurer à l'agenda sans compte ni second facteur ;
+// un praticien parti garde ses rendez-vous passés alors que son compte est
+// désactivé. Deux cycles de vie, deux tables.
+model Praticien {
+  id               String   @id @default(uuid()) @db.Uuid
+  userId           String?  @unique @map("user_id") @db.Uuid
+  nom              String
+  prenom           String
+  titre            String   @default("Chirurgien-dentiste")
+  couleur          String
+  actif            Boolean  @default(true)
+  // Sa part des soins qu'il fait, en pour cent, que le titulaire lui reverse chaque mois (D81). `null` : rien à
+  // lui reverser (le titulaire lui-même, ou une part pas encore réglée).
+  partRetrocession Int?     @map("part_retrocession")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  user               User?                  @relation(fields: [userId], references: [id], onDelete: Restrict)
+  plages             PlageDePresence[]
+  motifs             PraticienMotif[]
+  rendezVous         RendezVous[]
+  indisponibilites   Indisponibilite[]
+  semaineType        PresenceHebdomadaire[]
+  exceptionsPresence ExceptionPresence[]
+  fauteuils          FauteuilPraticien[]
+
+  reservations             ReservationPublique[]
+  inscriptionsListeAttente InscriptionListeAttente[]
+  versements               VersementRetrocession[]
+
+  @@map("praticien")
+}
+
+model Fauteuil {
+  id     String  @id @default(uuid()) @db.Uuid
+  siteId String  @map("site_id") @db.Uuid
+  nom    String
+  actif  Boolean @default(true)
+
+  site               Site                   @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  plages             PlageDePresence[]
+  rendezVous         RendezVous[]
+  semaineType        PresenceHebdomadaire[]
+  exceptionsPresence ExceptionPresence[]
+  praticiens         FauteuilPraticien[]
+
+  @@unique([siteId, nom])
+  @@map("fauteuil")
+}
+
+// La rétrocession d'un mois marquée « versée » par l'administrateur (D81). Le montant est figé au moment du
+// geste : un soin encaissé après coup ne réécrit pas ce qui a été payé.
+model VersementRetrocession {
+  id              String   @id @default(uuid()) @db.Uuid
+  praticienId     String   @map("praticien_id") @db.Uuid
+  /**
+   * "AAAA-MM", mois du cabinet.
+   */
+  mois            String
+  montantCentimes Int      @map("montant_centimes")
+  verseLe         DateTime @default(now()) @map("verse_le") @db.Timestamptz
+  verseParId      String   @map("verse_par_id") @db.Uuid
+
+  praticien Praticien @relation(fields: [praticienId], references: [id], onDelete: Cascade)
+  versePar  User      @relation(fields: [verseParId], references: [id], onDelete: Restrict)
+
+  @@unique([praticienId, mois])
+  @@map("versement_retrocession")
+}
+
+// Le fauteuil d'un praticien dans chaque cabinet, fixe (Marving, 27/10) : « le Dr Rivière est au fauteuil 2 de
+// Marie-Galante ». La semaine type et les exceptions ne le demandent plus, elles le recopient d'ici.
+model FauteuilPraticien {
+  praticienId String @map("praticien_id") @db.Uuid
+  siteId      String @map("site_id") @db.Uuid
+  fauteuilId  String @map("fauteuil_id") @db.Uuid
+
+  // En cascade : c'est un attribut du praticien et du fauteuil, rien à protéger au-delà d'eux.
+  praticien Praticien @relation(fields: [praticienId], references: [id], onDelete: Cascade)
+  site      Site      @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  fauteuil  Fauteuil  @relation(fields: [fauteuilId], references: [id], onDelete: Cascade)
+
+  @@id([praticienId, siteId])
+  @@map("fauteuil_praticien")
+}
+
+// « Le Dr X est au fauteuil 2 de Marie-Galante, lundi de 7h30 à 17h. »
+// C'est d'ici que vient le fauteuil d'un rendez-vous : on prend rendez-vous avec
+// un praticien, jamais avec un fauteuil (Q9).
+//
+// La règle « un praticien sur un seul site par jour » se tient ici et non sur le
+// rendez-vous : c'est la présence qui décide, le rendez-vous ne fait qu'en hériter.
+// L'index unique qui l'impose est dans prisma/sql/ — Prisma ne sait pas exprimer
+// un index sur une expression de date.
+model PlageDePresence {
+  id          String   @id @default(uuid()) @db.Uuid
+  praticienId String   @map("praticien_id") @db.Uuid
+  siteId      String   @map("site_id") @db.Uuid
+  fauteuilId  String   @map("fauteuil_id") @db.Uuid
+  debut       DateTime @db.Timestamptz
+  fin         DateTime @db.Timestamptz
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  praticien Praticien @relation(fields: [praticienId], references: [id], onDelete: Restrict)
+  site      Site      @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  fauteuil  Fauteuil  @relation(fields: [fauteuilId], references: [id], onDelete: Restrict)
+
+  @@index([siteId, debut])
+  @@index([praticienId, debut])
+  @@map("plage_presence")
+}
+
+// ─── Présences des praticiens (compléments d'agenda, lot 1) ───────────────────
+//
+// Jusqu'ici, aucun écran n'alimentait `PlageDePresence` : seul `seed-demo`
+// posait des plages à la main. Ce lot ajoute la semaine type (agenda fixe,
+// mêmes jours chaque semaine — Q2) et ses exceptions ponctuelles (Q5), à
+// partir desquelles `PlageDePresence` est ENTIÈREMENT dérivée par
+// réconciliation (`src/server/services/presences.ts`) sur l'horizon de deux
+// mois (Q3, même profondeur que le portail public — `HORIZON_JOURS`).
+//
+// `PlageDePresence` elle-même ne change pas de rôle : c'est toujours elle que
+// lisent l'agenda et le portail. Ce qui change, c'est sa source — un calcul
+// plutôt qu'une saisie directe, pour les praticiens qui ont une semaine type.
+
+// Une seule ligne par (praticien, jour) : un praticien n'est présent qu'à un
+// seul site par jour (Q1), et la présence n'a donc pas besoin d'un fauteuil
+// distinct pour matin/après-midi — l'éventuelle pause déjeuner reste modélisée
+// par une `Indisponibilite` de type PAUSE, pas par un trou dans la présence.
+model PresenceHebdomadaire {
+  id          String @id @default(uuid()) @db.Uuid
+  praticienId String @map("praticien_id") @db.Uuid
+  /**
+   * 1 = lundi … 7 = dimanche (ISO 8601), pas `Date.getUTCDay()` (0 = dimanche).
+   */
+  jourSemaine Int    @map("jour_semaine")
+  siteId      String @map("site_id") @db.Uuid
+  fauteuilId  String @map("fauteuil_id") @db.Uuid
+  /**
+   * Minutes depuis minuit, heure du cabinet — même convention que
+   * `IntervalleMinutes` dans `src/lib/dates.ts` (horaires d'ouverture, lot E).
+   */
+  heureDebut  Int    @map("heure_debut")
+  heureFin    Int    @map("heure_fin")
+  /**
+   * Pause facultative dans la journée (le midi), mêmes unités : la journée
+   * produit alors deux plages, avant et après. Les deux bornes vont ensemble
+   * et tiennent strictement entre `heureDebut` et `heureFin`
+   * (`presence_hebdo_pause_coherente`, prisma/sql/03_agenda_contraintes.sql).
+   */
+  pauseDebut  Int?   @map("pause_debut")
+  pauseFin    Int?   @map("pause_fin")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  praticien Praticien @relation(fields: [praticienId], references: [id], onDelete: Restrict)
+  site      Site      @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  fauteuil  Fauteuil  @relation(fields: [fauteuilId], references: [id], onDelete: Restrict)
+
+  @@unique([praticienId, jourSemaine])
+  @@map("presence_hebdomadaire")
+}
+
+enum TypeExceptionPresence {
+  // Pas de présence ce jour-là, alors que la semaine type en prévoit une
+  // (congé, jour fermé) — ou simplement rien à faire si la semaine type
+  // n'en prévoyait déjà pas.
+  RETRAIT
+  // Présence ce jour-là, à la place de ce que dit la semaine type (site,
+  // fauteuil, heures différents) — y compris un jour où la semaine type ne
+  // prévoit RIEN : c'est ce qui permettra, à un lot ultérieur, d'ouvrir un
+  // jour férié sans toucher à la semaine type elle-même.
+  AJOUT_OU_MODIFICATION
+}
+
+// Une exception PAR JOUR CIVIL et par praticien (`@@unique`) : la seconde
+// saisie sur la même date REMPLACE la première, elle ne s'y ajoute pas — il
+// n'y a jamais qu'une présence possible par jour (Q1).
+model ExceptionPresence {
+  id          String                @id @default(uuid()) @db.Uuid
+  praticienId String                @map("praticien_id") @db.Uuid
+  date        DateTime              @db.Date
+  type        TypeExceptionPresence
+  // Renseignés seulement pour AJOUT_OU_MODIFICATION, nuls pour RETRAIT — vérifié
+  // en base par `exception_presence_coherente` (prisma/sql/03_agenda_contraintes.sql),
+  // Prisma ne sachant pas exprimer une contrainte conditionnelle entre colonnes.
+  siteId      String?               @map("site_id") @db.Uuid
+  fauteuilId  String?               @map("fauteuil_id") @db.Uuid
+  heureDebut  Int?                  @map("heure_debut")
+  heureFin    Int?                  @map("heure_fin")
+  motif       String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  praticien Praticien @relation(fields: [praticienId], references: [id], onDelete: Restrict)
+  site      Site?     @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  fauteuil  Fauteuil? @relation(fields: [fauteuilId], references: [id], onDelete: Restrict)
+
+  @@unique([praticienId, date])
+  @@map("exception_presence")
+}
+
+// Catalogue administré depuis l'application, pas figé dans le code (D14).
+// Les 25 libellés du cadrage sont semés comme amorce, rien de plus.
+model MotifConsultation {
+  id              String   @id @default(uuid()) @db.Uuid
+  libelle         String   @unique
+  // Amorce les lignes praticien à la création. La durée qui fait foi est celle
+  // de PraticienMotif : chaque durée d'acte dépend de son praticien.
+  dureeIndicative Int      @map("duree_indicative")
+  couleur         String
+  estUrgence      Boolean  @default(false) @map("est_urgence")
+  // Le prix du soin, en centimes, de la grille du cabinet (D81) : proposé au passage en caisse, il fait la
+  // rétrocession. Une note d'honoraires ordinaire, aucune cotation (D1). `null` : pas encore de prix.
+  prixCentimes    Int?     @map("prix_centimes")
+  ordre           Int      @default(0)
+  // Désactivé, jamais supprimé : un motif retiré doit rester lisible sur les
+  // rendez-vous passés, sinon l'historique perd ses intitulés.
+  actif           Boolean  @default(true)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  praticiens               PraticienMotif[]
+  rendezVous               RendezVous[]
+  motifsPatient            MotifPatient[]
+  reservations             ReservationPublique[]
+  inscriptionsListeAttente InscriptionListeAttente[]
+
+  @@map("motif_consultation")
+}
+
+// Ce que le PATIENT choisit sur le portail public, par opposition à
+// MotifConsultation, qui est le vocabulaire du praticien.
+//
+// Les deux listes ne se confondent pas. « Dévitalisation », « pose d'onlay »,
+// « essayage » sont des actes que le praticien planifie à la fin du soin
+// précédent : un patient qui réserverait « pose de couronne » sans que la
+// couronne existe occuperait un fauteuil pour rien. À l'inverse, un patient sait
+// dire « j'ai mal » ou « c'est mon contrôle annuel ».
+//
+// Deux niveaux au plus. Une entrée est SOIT un menu qui porte des sous-entrées
+// (« Consultation de suivi »), SOIT un choix final qui pointe vers un motif
+// d'agenda. C'est de ce motif que viennent la durée et les règles, via le couple
+// praticien × motif (D14) : rien n'est dupliqué ici.
+//
+// Paramétrable depuis l'application, comme le catalogue des motifs : le jour où
+// le cabinet veut ajouter « Consultation de suivi — prothèse », il l'ajoute.
+model MotifPatient {
+  id      String  @id @default(uuid()) @db.Uuid
+  // Formulé pour un patient, pas pour un soignant.
+  libelle String
+  // Texte d'aide facultatif, pour lever un doute sans jargon.
+  aide    String?
+  ordre   Int     @default(0)
+  // Désactivé, jamais supprimé : une entrée retirée doit rester lisible sur les
+  // réservations passées.
+  actif   Boolean @default(true)
+
+  // Renseigné pour une sous-entrée, nul au premier niveau.
+  parentId String?        @map("parent_id") @db.Uuid
+  parent   MotifPatient?  @relation("SousMotifs", fields: [parentId], references: [id], onDelete: Restrict)
+  enfants  MotifPatient[] @relation("SousMotifs")
+
+  // Renseigné sur un choix final, nul sur un menu. Une entrée sans motif et sans
+  // enfants ne mène nulle part : le portail ne la propose pas.
+  motifId String?            @map("motif_id") @db.Uuid
+  motif   MotifConsultation? @relation(fields: [motifId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Un menu ne peut pas être lui-même une sous-entrée : deux niveaux, pas trois.
+  // La contrainte vit dans prisma/sql, Prisma ne sait pas l'exprimer.
+  @@index([parentId, ordre])
+  @@map("motif_patient")
+}
+
+// Qui pratique quoi, et en combien de temps. La durée vit ici : le cabinet a
+// répondu que chaque durée d'acte dépend de son praticien.
+model PraticienMotif {
+  praticienId  String @map("praticien_id") @db.Uuid
+  motifId      String @map("motif_id") @db.Uuid
+  dureeMinutes Int    @map("duree_minutes")
+
+  praticien Praticien         @relation(fields: [praticienId], references: [id], onDelete: Restrict)
+  motif     MotifConsultation @relation(fields: [motifId], references: [id], onDelete: Restrict)
+
+  @@id([praticienId, motifId])
+  @@map("praticien_motif")
+}
+
+// ⚠ Donnée de santé. Minimisation RGPD : ne rien ajouter ici sans une finalité
+// écrite. Le NIR en est volontairement absent (arbitrage DPO en cours) — la date
+// de naissance suffit à distinguer deux homonymes, ce que le cabinet confirme.
+model Patient {
+  id            String    @id @default(uuid()) @db.Uuid
+  nom           String
+  prenom        String
+  dateNaissance DateTime? @map("date_naissance") @db.Date
+  telephone     String
+  email         String?
+  // Un rendez-vous peut se prendre avec un nom et un téléphone seulement ; la
+  // fiche se complète à la venue. Le drapeau alimente la notification prévue.
+  profilComplet Boolean   @default(false) @map("profil_complet")
+
+  // Moins de 12 ans : représentant légal enregistré.
+  representantLegal     String? @map("representant_legal")
+  telephoneRepresentant String? @map("telephone_representant")
+
+  // Trois rendez-vous annulés ou non honorés et la réservation en ligne se ferme,
+  // jusqu'à déblocage par un administrateur (Q27). ⚠ Le délai n'entre PAS dans le
+  // compte : le cabinet n'a pas distingué une annulation de la veille d'une
+  // annulation faite huit jours avant. Une version antérieure de ce commentaire
+  // disait « annulations tardives » — elle inventait une règle.
+  //
+  // Le déblocage remet ce compteur à zéro. Sans ça, un patient débloqué à 3 se
+  // retrouverait bloqué au manquement suivant, et le déblocage n'aurait rien réglé.
+  manquements        Int       @default(0)
+  reservationBloquee Boolean   @default(false) @map("reservation_bloquee")
+  debloqueLe         DateTime? @map("debloque_le")
+
+  actif     Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  rendezVous   RendezVous[]
+  citeDansChat MessageChat[]
+
+  @@index([nom, prenom, dateNaissance])
+  @@map("patient")
+}
+
+model RendezVous {
+  id          String @id @default(uuid()) @db.Uuid
+  patientId   String @map("patient_id") @db.Uuid
+  praticienId String @map("praticien_id") @db.Uuid
+  siteId      String @map("site_id") @db.Uuid
+  fauteuilId  String @map("fauteuil_id") @db.Uuid
+  motifId     String @map("motif_id") @db.Uuid
+
+  // Figés à la prise, jamais relus depuis le motif. Sans cette copie, allonger un
+  // motif réécrirait rétroactivement tous les rendez-vous déjà posés, passés
+  // compris, et ferait surgir des chevauchements sur des journées écoulées (D14).
+  debut DateTime @db.Timestamptz
+  fin   DateTime @db.Timestamptz
+
+  statut      StatutRendezVous @default(A_CONFIRMER)
+  // Posé hors des horaires d'ouverture, par le praticien seul.
+  horsHoraire Boolean          @default(false) @map("hors_horaire")
+  // Urgence glissée par-dessus un planning plein. Seul drapeau qui exempte des
+  // contraintes de non-chevauchement — donc tracé, et réservé au praticien.
+  surbooking  Boolean          @default(false)
+  note        String?
+
+  // Vrai quand CE rendez-vous a coûté un manquement au patient (Q27). Porté par
+  // le rendez-vous plutôt que déduit du statut, pour deux raisons : le décompte
+  // devient idempotent — une secrétaire qui reclique « absent » ne compte pas
+  // deux fois — et réversible : elle corrige sa ligne, le point s'efface.
+  //
+  // Il tranche aussi ce que le statut ne dit pas : `ANNULE` vaut un manquement
+  // quand le patient annule depuis le portail, aucun quand c'est le cabinet qui
+  // annule pour lui (Q5 — le praticien est souffrant, ce n'est pas sa faute).
+  manquementCompte Boolean @default(false) @map("manquement_compte")
+
+  // Le passage en caisse (D81) : le montant validé par la secrétaire, en centimes, et quand. Posés en passant
+  // « En caisse », effacés si le rendez-vous en ressort. C'est ce que compte la rétrocession du mois.
+  montantCentimes Int?      @map("montant_centimes")
+  encaisseLe      DateTime? @map("encaisse_le") @db.Timestamptz
+
+  // Mémoire d'une demande d'annulation en attente (D17, retournée le
+  // 2026-09-23). Les trois colonnes vivent ou meurent ensemble : posées à la
+  // demande, effacées à la décision — validée ou refusée. `statutAvantAnnulation`
+  // est ce qui permet un refus « intact » : sans lui, refuser une demande ne
+  // saurait pas où remettre le rendez-vous.
+  statutAvantAnnulation   StatutRendezVous? @map("statut_avant_annulation")
+  annulationDemandeeParId String?           @map("annulation_demandee_par_id") @db.Uuid
+  annulationDemandeeLe    DateTime?         @map("annulation_demandee_le") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  patient               Patient                @relation(fields: [patientId], references: [id], onDelete: Restrict)
+  praticien             Praticien              @relation(fields: [praticienId], references: [id], onDelete: Restrict)
+  site                  Site                   @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  fauteuil              Fauteuil               @relation(fields: [fauteuilId], references: [id], onDelete: Restrict)
+  motif                 MotifConsultation      @relation(fields: [motifId], references: [id], onDelete: Restrict)
+  reservationPublique   ReservationPublique?
+  // La conversation avec l'assistant des urgences qui a posé ce rendez-vous (D77), s'il y en a une.
+  conversationAssistant ConversationAssistant?
+  // Qui a demandé l'annulation — un membre du personnel, jamais le patient : la
+  // sienne (D22) suit un chemin distinct, non concerné par cette relation.
+  annulationDemandeePar User?                  @relation(fields: [annulationDemandeeParId], references: [id], onDelete: Restrict)
+  // Notifications liées à CE rendez-vous (confirmation, modification,
+  // rappels — lots 1 et 3). `onDelete: Restrict` côté `Notification` : ce
+  // dépôt ne supprime jamais un rendez-vous, il change son statut (D9).
+  notifications         Notification[]
+  citeDansChat          MessageChat[]
+
+  @@index([siteId, debut])
+  @@index([praticienId, debut])
+  @@index([fauteuilId, debut])
+  @@index([patientId])
+  // Sert l'encart « demandes d'annulation en attente » du tableau de bord d'un
+  // praticien : filtré par lui ET par ce statut précis.
+  @@index([praticienId, statut])
+  @@map("rendez_vous")
+}
+
+// Congés, jours fériés, pause déjeuner, créneaux gardés pour les urgences.
+// Deux portées : un site entier (férié, fermeture) ou un praticien (congé).
+model Indisponibilite {
+  id          String              @id @default(uuid()) @db.Uuid
+  type        TypeIndisponibilite
+  praticienId String?             @map("praticien_id") @db.Uuid
+  siteId      String?             @map("site_id") @db.Uuid
+  debut       DateTime            @db.Timestamptz
+  fin         DateTime            @db.Timestamptz
+  motif       String?
+  createdAt   DateTime            @default(now()) @map("created_at")
+  updatedAt   DateTime            @updatedAt @map("updated_at")
+
+  praticien Praticien? @relation(fields: [praticienId], references: [id], onDelete: Restrict)
+  site      Site?      @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  @@index([siteId, debut])
+  @@index([praticienId, debut])
+  @@map("indisponibilite")
+}
+
+// Note libre posée sur un jour civil d'un cabinet : sans heure, sans lien avec un
+// patient ni un rendez-vous. Lue selon D5 (filtre par site).
+model NoteJour {
+  id        String   @id @default(uuid()) @db.Uuid
+  siteId    String   @map("site_id") @db.Uuid
+  // Jour civil America/Guadeloupe, sans heure.
+  jour      DateTime @db.Date
+  texte     String
+  auteurId  String   @map("auteur_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  site   Site @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  auteur User @relation("NotesJourAuteur", fields: [auteurId], references: [id], onDelete: Restrict)
+
+  @@index([siteId, jour])
+  @@map("note_jour")
+}
+
+// ─── Second facteur par SMS ───────────────────────────────────────────────────
+
+// Code à usage unique envoyé par SMS, lié à UNE session de connexion.
+//
+// Lié à la session et non au compte : deux connexions entamées en parallèle —
+// l'accueil et le portable du praticien — ne doivent pas s'invalider l'une
+// l'autre. Un code rattaché au compte ferait que la seconde demande casse la
+// première, sans que personne comprenne pourquoi.
+//
+// Le code est stocké HACHÉ. Un code à six chiffres se retrouve en une seconde
+// par force brute si on connaît son condensat, mais le stocker en clair
+// donnerait accès aux sessions en cours à qui lirait la table — et la
+// protection ne coûte rien.
+model CodeSms {
+  id         String   @id @default(uuid()) @db.Uuid
+  sessionId  String   @unique @map("session_id") @db.Uuid
+  codeHash   String   @map("code_hash")
+  expiresAt  DateTime @map("expires_at")
+  // Trois essais, puis il faut en redemander un. Sans ce compteur, six chiffres
+  // se devinent en quelques milliers de tentatives.
+  tentatives Int      @default(0)
+  // Nombre de SMS partis pour cette session. Compté ici et non en nombre de
+  // lignes : un renvoi met la ligne à jour au lieu d'en créer une, si bien
+  // qu'un décompte par lignes resterait bloqué à un et ne limiterait rien.
+  envois     Int      @default(1)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("code_sms")
+}
+
+// Une connexion en attente de son second facteur, validée depuis le téléphone de la personne (D83) : le poste
+// affiche un QR qui porte le jeton, le téléphone reconnu répond « Oui, c'est moi » ou « Non ». Seul le condensat
+// du jeton est stocké, comme pour les sessions (D6ter).
+model ValidationTelephone {
+  id         String    @id @default(uuid()) @db.Uuid
+  sessionId  String    @unique @map("session_id") @db.Uuid
+  jetonHash  String    @unique @map("jeton_hash")
+  expiresAt  DateTime  @map("expires_at")
+  approuveLe DateTime? @map("approuve_le")
+  refuseLe   DateTime? @map("refuse_le")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("validation_telephone")
+}
+
+// Une réservation entamée depuis le portail, avant que le patient ait prouvé son
+// numéro. Elle n'est PAS un rendez-vous : tant que le code n'est pas validé,
+// rien n'occupe l'agenda.
+//
+// POURQUOI UNE TABLE ET NON UN COOKIE. Le code se vérifie sur le serveur, et le
+// créneau visé doit survivre au rechargement de page. Un état côté client
+// laisserait aussi choisir son propre créneau en le réécrivant.
+//
+// ⚠ IDENTITÉ ET CONTACT SEULEMENT. Le motif y figure parce qu'il détermine la
+// durée et le créneau, pas pour décrire un état de santé. Rien d'autre du
+// patient n'entre ici, et la ligne est purgée après usage ou expiration.
+model ReservationPublique {
+  id String @id @default(uuid()) @db.Uuid
+
+  // Le créneau visé, figé au moment du choix. Il n'est pas réservé pour autant :
+  // un autre patient peut le prendre entre le choix et la validation du code.
+  motifId     String   @map("motif_id") @db.Uuid
+  praticienId String   @map("praticien_id") @db.Uuid
+  siteId      String   @map("site_id") @db.Uuid
+  debut       DateTime
+  fin         DateTime
+
+  nom       String
+  prenom    String
+  telephone String
+
+  // Haché, jamais en clair — même raison que pour CodeSms.
+  codeHash   String   @map("code_hash")
+  expiresAt  DateTime @map("expires_at")
+  tentatives Int      @default(0)
+  envois     Int      @default(1)
+
+  // L'aboutissement, s'il a lieu. Renseigné une fois le rendez-vous écrit.
+  rendezVousId String? @unique @map("rendez_vous_id") @db.Uuid
+
+  // Sert à la limitation de débit : sans elle, un robot fait payer au cabinet
+  // autant de SMS qu'il veut.
+  ipAddress String   @map("ip_address")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  motif      MotifConsultation @relation(fields: [motifId], references: [id], onDelete: Restrict)
+  praticien  Praticien         @relation(fields: [praticienId], references: [id], onDelete: Restrict)
+  site       Site              @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  rendezVous RendezVous?       @relation(fields: [rendezVousId], references: [id], onDelete: SetNull)
+
+  @@index([expiresAt])
+  @@index([ipAddress, createdAt])
+  @@map("reservation_publique")
+}
+
+// ─── Accès patient par téléphone ──────────────────────────────────────────────
+
+// Code à usage unique envoyé au numéro d'un patient, puis courte fenêtre pendant
+// laquelle il peut voir et annuler ses rendez-vous — sans compte (Q28).
+//
+// POURQUOI PAS `CodeSms`. Celui-là est lié à une `Session`, donc à un compte du
+// personnel. Un patient n'en a pas : c'est son numéro vérifié qui l'identifie,
+// et c'est déjà lui qui permet de le reconnaître d'une réservation sur l'autre.
+//
+// POURQUOI UNE FENÊTRE EN BASE, et non un jeton autonome. Entre le code saisi et
+// le clic sur « annuler », le patient doit rester reconnu. Un jeton signé ferait
+// l'affaire mais ne se révoque pas, et donnerait sur des rendez-vous — donc sur
+// une donnée de santé. Même raison que D6 pour le personnel.
+//
+// Le code et le jeton sont stockés HACHÉS. Qui lirait cette table ne pourrait
+// pas s'en servir pour ouvrir une fenêtre au nom de quelqu'un.
+model AccesPatient {
+  id        String @id @default(uuid()) @db.Uuid
+  telephone String
+
+  codeHash   String   @map("code_hash")
+  expiresAt  DateTime @map("expires_at")
+  tentatives Int      @default(0)
+  envois     Int      @default(1)
+
+  // Renseignés à la vérification du code : c'est ce qui ouvre la fenêtre. Tant
+  // que `jetonHash` est nul, aucune lecture de rendez-vous n'est possible.
+  jetonHash     String?   @unique @map("jeton_hash")
+  fenetreExpire DateTime? @map("fenetre_expire")
+
+  // Sans elle, un robot fait payer au cabinet autant de SMS qu'il veut — et
+  // découvre au passage quels numéros sont patients du cabinet.
+  ipAddress String   @map("ip_address")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([expiresAt])
+  @@index([ipAddress, createdAt])
+  @@index([telephone, createdAt])
+  @@map("acces_patient")
+}
+
+// ─── Limitation de débit des lectures publiques ───────────────────────────────
+
+// Compte, par adresse IP et par fenêtre de 15 minutes, les appels à
+// `creneauxDisponibles` — le seul calcul coûteux du portail, celui qu'un robot
+// peut boucler pour relever deux mois d'agenda (D25).
+//
+// POURQUOI UNE TABLE À PART, PAS `audit_log`. Une lecture anonyme n'est pas un
+// accès qu'on journalise (voir `src/server/queries/public/README.md`) : le
+// journal est conservé 36 mois et nommer chaque consultation d'un patient qui
+// n'a pas de compte n'a rien à y faire. Cette table, elle, ne décrit personne —
+// une IP et un compteur — et ses lignes sont jetables.
+//
+// `fenetre` est le DÉBUT de la fenêtre de 15 minutes, tronqué : pas un instant
+// glissant. Ça rend l'incrément atomique par upsert (clé unique ip × fenêtre) et
+// évite de relire l'historique à chaque appel pour faire une moyenne glissante.
+model CompteurLecturePublique {
+  id        String   @id @default(uuid()) @db.Uuid
+  ipAddress String   @map("ip_address")
+  fenetre   DateTime
+  nombre    Int      @default(1)
+
+  @@unique([ipAddress, fenetre])
+  @@map("compteur_lecture_publique")
+}
+
+// ─── Liste d'attente (phase 3, lot D) ──────────────────────────────────────────
+
+// Ce que devient un envoi programmé pour un créneau libéré (D29) :
+//   EN_ATTENTE  — pas encore parti (immédiat pas encore traité, ou différé
+//                 jusqu'à 8h, America/Guadeloupe)
+//   ENVOYE      — le SMS est réellement parti
+//   ABANDONNE   — la fenêtre de 21h-8h l'a différé, et à 8h le créneau n'était
+//                 plus libre ou plus à venir : rien ne part, jamais.
+enum StatutEnvoiListeAttente {
+  EN_ATTENTE
+  ENVOYE
+  ABANDONNE
+}
+
+// Un patient qui attend qu'un créneau se libère, pour un motif et un cabinet
+// donnés — praticien facultatif (D29). Identification par numéro vérifié par
+// SMS, EXACTEMENT le mécanisme de l'accès patient (D23) : pas un second canal
+// de code à usage unique, `AccesPatient` et son jeton de fenêtre servent aussi
+// ici. C'est pour ça qu'aucun `codeHash` ne vit sur ce modèle.
+//
+// ⚠ Donnée de santé par association (motif + rattachement à un cabinet), donc
+// minimisation RGPD comme le reste du portail : rien d'autre que le
+// strict nécessaire à la correspondance.
+model InscriptionListeAttente {
+  id        String @id @default(uuid()) @db.Uuid
+  telephone String
+
+  motifId     String  @map("motif_id") @db.Uuid
+  siteId      String  @map("site_id") @db.Uuid
+  // Nul = « peu importe qui », comme à la réservation (Q « peu importe »).
+  praticienId String? @map("praticien_id") @db.Uuid
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  // Horizon d'ouverture du portail (HORIZON_JOURS, deux mois) : une inscription
+  // plus vieille que l'horizon ne correspond plus à rien de réservable.
+  expiresAt DateTime  @map("expires_at")
+  // Date butoir : nul = pas de date butoir (comportement d'origine). Sinon,
+  // début du premier créneau qui était déjà proposé au patient au moment de
+  // son inscription — un créneau libéré après n'a rien à lui apporter qu'il
+  // n'avait déjà (D29, décision de Marving du 2026-09-23). Calculée côté
+  // serveur à l'inscription, jamais reçue du navigateur.
+  avantLe   DateTime? @map("avant_le")
+
+  motif     MotifConsultation   @relation(fields: [motifId], references: [id], onDelete: Restrict)
+  site      Site                @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  praticien Praticien?          @relation(fields: [praticienId], references: [id], onDelete: Restrict)
+  envois    EnvoiListeAttente[]
+
+  @@index([motifId, siteId, praticienId])
+  @@index([telephone])
+  @@index([expiresAt])
+  @@map("inscription_liste_attente")
+}
+
+// Un SMS programmé (ou déjà parti) pour UN inscrit et UN créneau libéré précis.
+//
+// POURQUOI UNE TABLE ET NON UN APPEL DIRECT. Deux raisons : le report de
+// 21h-8h suppose un état qui survit à la requête qui l'a créé — il n'y a encore
+// ni worker ni file d'attente (D30, phase 4) — et le plafond de cinq par
+// créneau libéré doit tenir sous deux libérations concurrentes ; compter les
+// lignes déjà écrites, sous verrou, est ce qui le garantit (D30).
+model EnvoiListeAttente {
+  id            String @id @default(uuid()) @db.Uuid
+  inscriptionId String @map("inscription_id") @db.Uuid
+
+  // Le créneau concerné, figé au moment de la libération. Sert à la fois à
+  // retrouver si le créneau est encore libre au moment différé, et à compter
+  // « combien d'envois déjà pour CE créneau » sans dépendre d'un identifiant de
+  // rendez-vous qui, justement, n'existe plus une fois annulé.
+  creneauDebut DateTime @map("creneau_debut") @db.Timestamptz
+  creneauFin   DateTime @map("creneau_fin") @db.Timestamptz
+  praticienId  String   @map("praticien_id") @db.Uuid
+  siteId       String   @map("site_id") @db.Uuid
+  // Dupliqué depuis l'inscription plutôt que relu à l'envoi différé : le
+  // script planifié (D30) reconstruit le lien de réservation à partir de
+  // cette seule ligne, sans avoir à rejoindre `InscriptionListeAttente`.
+  motifId      String   @map("motif_id") @db.Uuid
+
+  statut       StatutEnvoiListeAttente @default(EN_ATTENTE)
+  // Renseigné seulement pour un envoi différé (fenêtre 21h-8h) : l'heure à
+  // laquelle le script planifié doit le reprendre. Nul pour un envoi immédiat.
+  planifiePour DateTime?               @map("planifie_pour") @db.Timestamptz
+  envoyeLe     DateTime?               @map("envoye_le") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  inscription  InscriptionListeAttente @relation(fields: [inscriptionId], references: [id], onDelete: Cascade)
+  // Sa ligne dans la file de notifications (phase 4, lot 1) : nulle pour un
+  // envoi créé avant ce lot (voir `rattraperEnvoisOrphelins`), ou si l'envoi a
+  // été supprimé (`Notification.envoiListeAttenteId` passe alors à NULL —
+  // `onDelete: SetNull` côté `Notification` — la ligne `Notification`
+  // elle-même survit, comme le journal qu'elle est).
+  notification Notification?
+
+  // Sert le comptage du plafond de 5 (D30) : toutes les lignes déjà écrites
+  // pour CE praticien et CE créneau, quel que soit leur statut.
+  @@index([praticienId, creneauDebut, creneauFin])
+  // Sert le script planifié : les envois différés dus.
+  @@index([statut, planifiePour])
+  @@map("envoi_liste_attente")
+}
+
+// ─── File de notifications (phase 4, lot 1) ────────────────────────────────────
+//
+// `Notification` EST le journal des envois — SMS aujourd'hui, e-mail au lot 2
+// (D37) : statut, fournisseur, référence, coût en crédits, erreur, nombre de
+// tentatives. Une mutation métier qui doit prévenir quelqu'un n'appelle plus
+// `envoyerSms` directement : elle ÉMET une ligne ici (`emettre`, dans la même
+// transaction que l'écriture métier quand il y en a une — voir `creneauLibere`),
+// et c'est le worker séparé (`scripts/worker-notifications.ts`) qui la prend en
+// charge, à son rythme. Conséquence : `audit_log` reste réservé aux actions
+// humaines et de sécurité, il ne trace plus l'envoi lui-même.
+
+enum CanalNotification {
+  SMS
+  EMAIL
+}
+
+enum TypeNotification {
+  CONFIRMATION_RESERVATION
+  MODIFICATION_RENDEZ_VOUS
+  ANNULATION_PATIENT
+  ANNULATION_CABINET
+  RAPPEL_J2
+  RAPPEL_H3
+  CRENEAU_LIBERE
+  REPONSE_SMS
+}
+
+// A_ENVOYER  — en attente d'un passage du worker, éventuellement différée par
+//              `planifiePour` (fenêtre de silence 21h-8h, D29, ou backoff après
+//              un échec, D40).
+// EN_COURS   — prise par un worker (`prisLe` posé), pas encore résolue.
+// ENVOYEE    — réellement partie.
+// ECHEC      — le fournisseur a refusé au moins cinq fois de suite (D40), ou le
+//              canal n'est pas encore branché (e-mail, lot 1).
+// ABANDONNEE — devenue sans objet avant d'avoir été tentée (créneau repris ou
+//              passé, par exemple) — jamais un appel au fournisseur, à la
+//              différence d'ECHEC.
+// INCERTAINE — prise par un worker qui n'a plus donné signe de vie (D39) : ni
+//              ENVOYEE ni ECHEC, et JAMAIS remise en file — voir
+//              `marquerIncertaines`, un rappel ne part jamais deux fois.
+enum StatutNotification {
+  A_ENVOYER
+  EN_COURS
+  ENVOYEE
+  ECHEC
+  ABANDONNEE
+  INCERTAINE
+}
+
+model Notification {
+  id    String            @id @default(uuid()) @db.Uuid
+  type  TypeNotification
+  canal CanalNotification
+
+  // Rend `emettre` idempotente (D38) : un même événement (même type, même
+  // entité, même destinataire, même canal) n'écrit jamais deux lignes, quel
+  // que soit le nombre de fois où l'appelant émet — double clic, rejeu de
+  // transaction, rattrapage. Voir `cleIdempotence()`.
+  cleIdempotence String @unique @map("cle_idempotence")
+
+  // Téléphone E.164 ou e-mail — jamais les deux, `canal` dit lequel.
+  destinataire String
+  // Le message déjà rendu, au moment de l'émission — sauf les rappels (lot 3),
+  // dont le texte peut dépendre de l'état du rendez-vous AU MOMENT d'envoyer.
+  // Gardé simple ici, au lot 1 : obligatoire, comme le reste de ce modèle.
+  texte        String
+  sujet        String? // e-mail seulement
+
+  rendezVousId    String?   @map("rendez_vous_id") @db.Uuid
+  // Le début du rendez-vous AU MOMENT de l'émission — sert à détecter qu'il a
+  // été déplacé depuis (cette ligne parlerait alors encore de l'ancienne heure).
+  rendezVousDebut DateTime? @map("rendez_vous_debut") @db.Timestamptz
+
+  envoiListeAttenteId String? @unique @map("envoi_liste_attente_id") @db.Uuid
+
+  siteId String? @map("site_id") @db.Uuid
+
+  planifiePour DateTime           @default(now()) @map("planifie_pour") @db.Timestamptz
+  statut       StatutNotification @default(A_ENVOYER)
+  tentatives   Int                @default(0)
+  // Horodatage de prise par un worker (`prendreLot`) — sert `marquerIncertaines`
+  // à détecter un worker mort en cours de traitement (D39).
+  prisLe       DateTime?          @map("pris_le") @db.Timestamptz
+
+  fournisseur          String?
+  referenceFournisseur String? @map("reference_fournisseur")
+  // Coût en crédits fournisseur, si connu (Brevo le rend sur un envoi réussi).
+  creditsUtilises      Float?  @map("credits_utilises")
+
+  derniereErreur String?   @map("derniere_erreur")
+  envoyeeLe      DateTime? @map("envoyee_le") @db.Timestamptz
+
+  // Lot 4 : une notification qui attend une réponse SMS du destinataire.
+  attendReponse Boolean @default(false) @map("attend_reponse")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  rendezVous        RendezVous?        @relation(fields: [rendezVousId], references: [id], onDelete: Restrict)
+  // `SetNull`, pas `Restrict` : un inscrit qui se désinscrit fait cascader la
+  // suppression de son `EnvoiListeAttente` (D30) — cette ligne, elle, doit
+  // survivre comme trace de ce qui a été tenté, simplement détachée.
+  envoiListeAttente EnvoiListeAttente? @relation(fields: [envoiListeAttenteId], references: [id], onDelete: SetNull)
+  site              Site?              @relation(fields: [siteId], references: [id])
+
+  // Sert `prendreLot` : les lignes dues, dans l'ordre de planification.
+  @@index([statut, planifiePour])
+  @@index([rendezVousId])
+  @@index([referenceFournisseur])
+  @@index([destinataire, envoyeeLe])
+  @@map("notification")
+}
+
+// ─── Modèles de messages (phase 4, lot 5a) ─────────────────────────────────────
+
+// Un texte modifiable par (type, canal) : ce que le cabinet règle depuis
+// `/tableau-de-bord/messages` au lieu du texte figé dans `messages.ts`.
+//
+// ABSENTE EN BASE = LE DÉFAUT DU CODE S'APPLIQUE (`src/lib/modeles-messages.ts`).
+// Le seed n'écrit une ligne ici QUE SI ELLE EST ABSENTE (`skipDuplicates`) et
+// ne la touche plus jamais ensuite — sinon un texte modifié par le cabinet
+// serait repris au prochain seed, exactement le défaut qu'on évite déjà pour
+// le catalogue des motifs (`prisma/seed.ts`).
+//
+// REPONSE_SMS n'a AUCUNE ligne ici : ses trois variantes (confirmé, trop tard,
+// non compris) ne tiennent pas dans un texte unique par canal, et les rendre
+// paramétrables aurait supposé soit trois lignes par une clé absente du
+// modèle, soit une contrainte d'unicité différente pour ce seul type. Restent
+// fixes, comme avant ce lot — voir `src/server/notifications/messages.ts`.
+model ModeleMessage {
+  id    String            @id @default(uuid()) @db.Uuid
+  type  TypeNotification
+  canal CanalNotification
+
+  // E-mail seulement ; toujours `null` pour SMS, un sujet n'ayant pas de sens
+  // sur ce canal. Le canal e-mail est câblé depuis le lot 2 (transporteur,
+  // `traiterLot`), mais aucune notification EMAIL n'est à ce jour envoyée à un
+  // patient réel : rien dans ce dépôt n'émet encore vers une adresse e-mail de
+  // patient — seuls les tests exercent ce chemin.
+  sujet String?
+  corps String
+
+  // `null` : ligne semée, jamais retouchée par un humain. Le seed ne la crée
+  // que si elle est absente, mais ne connaît pas d'utilisateur à qui
+  // l'attribuer.
+  modifieParId String? @map("modifie_par_id") @db.Uuid
+  modifiePar   User?   @relation(fields: [modifieParId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([type, canal])
+  @@map("modele_message")
+}
+
+// ─── Préférences patient par canal (phase 4, lot 5b, D44) ─────────────────────
+
+// « Préférences patient par canal, avec désabonnement des messages non
+// essentiels. Les rappels de rendez-vous restent activables comme information
+// de soin (RGPD). » (brief du cabinet).
+//
+// Trois catégories de notifications (`src/lib/categories-notifications.ts`) :
+// TRANSACTIONNEL (confirmation, modification, annulation, réponse SMS) ne
+// passe jamais par cette table — c'est la réponse directe à un geste du
+// patient ou du cabinet sur SON rendez-vous, aucune préférence ne le coupe.
+// INFORMATION_SOIN (les deux rappels) est activé par défaut, désactivable par
+// canal : c'est `rappels` ci-dessous. NON_ESSENTIEL (créneau libéré) est ce
+// que coupe le désabonnement général : c'est `nonEssentiels`.
+//
+// CLÉ PAR ADRESSE (canal + destinataire), PAS PAR `Patient`. Deux raisons :
+// le worker qui applique la préférence à l'envoi (`traiterLot`) ne connaît
+// que le destinataire d'une `Notification`, jamais un `patientId` ; et
+// l'accès patient (D23) authentifie par le numéro vérifié, pas par une fiche
+// — exactement le même choix que `InscriptionListeAttente.telephone`.
+//
+// ABSENCE DE LIGNE = TOUT AUTORISÉ. Un patient qui n'a jamais rien réglé doit
+// continuer de recevoir ses rappels : le défaut est permissif, jamais un
+// désabonnement silencieux par simple absence de préférence enregistrée.
+model PreferenceNotification {
+  id            String            @id @default(uuid()) @db.Uuid
+  canal         CanalNotification
+  // Téléphone E.164 ou e-mail — même format que `Notification.destinataire`,
+  // et pour la même raison : `canal` dit lequel des deux c'est.
+  destinataire  String
+  // Coupe RAPPEL_J2 et RAPPEL_H3 (INFORMATION_SOIN) pour ce canal.
+  rappels       Boolean           @default(true)
+  // Coupe CRENEAU_LIBERE (NON_ESSENTIEL) pour ce canal. Ne touche JAMAIS aux
+  // rappels — désabonnement séparé, voir `rappels` ci-dessus.
+  nonEssentiels Boolean           @default(true) @map("non_essentiels")
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+
+  @@unique([canal, destinataire])
+  @@map("preference_notification")
+}
+
+// ─── Réponse SMS au rappel (phase 4, lot 4) ────────────────────────────────────
+
+// Idempotence du webhook entrant Brevo : Brevo peut rejouer un événement déjà
+// livré. `cleIdempotence` porte `messageId:ts_event` du corps Brevo (voir
+// `src/server/validation/webhook-sms.ts` pour le format supposé, NON ÉPROUVÉ) —
+// une insertion en doublon (`createMany` + `skipDuplicates`, même mécanisme que
+// `Notification.emettre`) dit que l'événement a déjà été traité, sans avoir à
+// relire quoi que ce soit d'autre. Aucune colonne « contenu » : cette table ne
+// sert qu'à reconnaître un rejeu, pas à conserver la réponse elle-même — la
+// trace de ce qui a été décidé vit dans `audit_log`
+// (`AuditAction.REPONSE_SMS_TRAITEE`) et, si une réponse SMS a été renvoyée au
+// patient, dans `Notification` (`TypeNotification.REPONSE_SMS`).
+model WebhookSmsEntrant {
+  id             String   @id @default(uuid()) @db.Uuid
+  cleIdempotence String   @unique @map("cle_idempotence")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@map("webhook_sms_entrant")
+}
+
+// ─── Assistant (D77) ─────────────────────────────────────────────────────────
+//
+// Un seul assistant (Claude), plusieurs usages : les urgences, côté patient, sur le site ; plus tard l'analyse
+// (RAG), côté praticien. Chaque conversation dit pour quel usage elle a eu lieu : c'est ce qui décide de ce que
+// l'assistant a le droit de voir.
+
+enum UsageAssistant {
+  URGENCES
+  ANALYSE
+}
+
+/// Les niveaux de l'assistant des urgences (D77, D79), chacun avec son délai : vitale (le 15, tout de suite),
+/// forte (48 h), simple (72 h), différable (7 jours), pas urgent (la réservation habituelle).
+enum NiveauUrgence {
+  VITALE
+  URGENCE_FORTE
+  URGENCE_SIMPLE
+  DIFFERABLE
+  NON_URGENT
+}
+
+model ConversationAssistant {
+  id    String         @id @default(uuid()) @db.Uuid
+  usage UsageAssistant
+
+  // Les échanges, dans l'ordre : [{ role: 'patient' | 'assistant', texte, choix? }]. Ce que le patient a écrit
+  // de sa douleur est une donnée de santé : lu par le cabinet seul, depuis la fiche du rendez-vous.
+  messages Json @default("[]")
+
+  // Le verdict de l'assistant, et la correction du cabinet s'il y en a une : l'écart entre les deux mesure sa
+  // justesse.
+  niveau        NiveauUrgence?
+  resume        String[]       @default([])
+  niveauCabinet NiveauUrgence? @map("niveau_cabinet")
+
+  // Les créneaux proposés au patient : il ne peut réserver que l'un d'eux. `raison` : pourquoi l'assistant a choisi
+  // ceux-là (D79), dit au patient et relu par le cabinet.
+  propositions Json    @default("[]")
+  raison       String?
+  // Les créneaux que l'assistant a consultés (`chercher_creneaux`) : il ne peut proposer que l'un d'eux.
+  creneauxVus  Json    @default("[]") @map("creneaux_vus")
+
+  // Demande d'urgence transmise au praticien quand rien n'est libre dans le délai (D79) : le cabinet rappelle.
+  contactPrenom    String?   @map("contact_prenom")
+  contactNom       String?   @map("contact_nom")
+  contactTelephone String?   @map("contact_telephone")
+  demandeLe        DateTime? @map("demande_le")
+  demandeTraiteeLe DateTime? @map("demande_traitee_le")
+
+  rendezVousId String? @unique @map("rendez_vous_id") @db.Uuid
+
+  // Limitation de débit, comme la réservation en ligne : chaque message coûte un appel à Claude.
+  ipAddress String   @map("ip_address")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  rendezVous RendezVous? @relation(fields: [rendezVousId], references: [id], onDelete: SetNull)
+
+  @@index([ipAddress, createdAt])
+  @@index([createdAt])
+  @@index([demandeLe, demandeTraiteeLe])
+  @@map("conversation_assistant")
+}
+
+// Le chat interne (D82, Marving, 28/10) : chaque membre du personnel écrit à un collègue, une conversation par paire de
+// personnes. La paire est rangée (`userAId` < `userBId`) : une seule conversation entre deux personnes, quel que soit
+// celui qui écrit le premier.
+model ConversationChat {
+  id               String    @id @default(uuid()) @db.Uuid
+  userAId          String    @map("user_a_id") @db.Uuid
+  userBId          String    @map("user_b_id") @db.Uuid
+  dernierMessageLe DateTime? @map("dernier_message_le") @db.Timestamptz
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  userA    User          @relation("ConversationChatA", fields: [userAId], references: [id], onDelete: Restrict)
+  userB    User          @relation("ConversationChatB", fields: [userBId], references: [id], onDelete: Restrict)
+  messages MessageChat[]
+
+  @@unique([userAId, userBId])
+  @@index([userBId])
+  @@map("conversation_chat")
+}
+
+// Un message, et ce qu'il cite : un patient, ou l'un de ses rendez-vous (un clic ouvre la fiche). Les messages restent :
+// on ne les supprime pas. `luLe` : quand le destinataire a ouvert la conversation — c'est ce que compte la pastille.
+model MessageChat {
+  id             String    @id @default(uuid()) @db.Uuid
+  conversationId String    @map("conversation_id") @db.Uuid
+  auteurId       String    @map("auteur_id") @db.Uuid
+  texte          String
+  patientId      String?   @map("patient_id") @db.Uuid
+  rendezVousId   String?   @map("rendez_vous_id") @db.Uuid
+  envoyeLe       DateTime  @default(now()) @map("envoye_le") @db.Timestamptz
+  luLe           DateTime? @map("lu_le") @db.Timestamptz
+
+  conversation ConversationChat @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  auteur       User             @relation(fields: [auteurId], references: [id], onDelete: Restrict)
+  patient      Patient?         @relation(fields: [patientId], references: [id], onDelete: SetNull)
+  rendezVous   RendezVous?      @relation(fields: [rendezVousId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, envoyeLe])
+  @@index([conversationId, luLe])
+  @@map("message_chat")
+}

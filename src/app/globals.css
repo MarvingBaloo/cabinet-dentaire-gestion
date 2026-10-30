@@ -1,0 +1,500 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-montserrat);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Titres du site public et du tableau de bord : les deux pointent vers la
+     même police, Poppins (charte du 22/10) — un seul système de titres partout. */
+  --font-heading: var(--font-poppins);
+  --font-titre: var(--font-poppins);
+  /* Texte posé sur les bandes sauge clair de la charte (V4, 22/10) : le blanc ne s'y lit pas. */
+  --color-encre: #24332f;
+  --color-marine: var(--marine);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  /* Jetons d'état — toujours doublés d'une icône et d'un texte (message.tsx),
+     jamais la couleur seule. */
+  --color-etat-erreur: var(--etat-erreur);
+  --color-etat-erreur-fond: var(--etat-erreur-fond);
+  --color-etat-succes: var(--etat-succes);
+  --color-etat-succes-fond: var(--etat-succes-fond);
+  --color-etat-alerte: var(--etat-alerte);
+  --color-etat-alerte-fond: var(--etat-alerte-fond);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* Palette de la charte « MG Cabinet dentaire » (V4 de maquette-charte-3.pdf, choisie le 22/10) :
+   sauge #6DB7AB et sauge clair #A9D6CD pour les bandes, sauge profond pour les boutons, liens et
+   chiffres, crème #F7F6F2 pour les fonds. Le sauge profond et l'encre sont ajoutés à la charte : du
+   blanc sur son sauge ne se lit pas (2,3:1). Contrastes WCAG AA vérifiés :
+   --primary #387A70 5,0:1 sur blanc, 4,6:1 sur crème · --foreground #24332F 13,2:1 ·
+   --muted-foreground #5D6A66 5,6:1 · encre #24332F sur sauge #6DB7AB 5,7:1.
+   `--primary` est à la limite sur le crème : ne pas l'éclaircir.
+   Aucun mode sombre : rien ne le déclenche dans l'application. */
+:root {
+  --background: #F7F6F2;
+  --foreground: #24332F;
+  --card: #FFFFFF;
+  --card-foreground: #24332F;
+  --popover: #FFFFFF;
+  --popover-foreground: #24332F;
+  --primary: #387A70;
+  --primary-foreground: #FFFFFF;
+  --secondary: #F1F6F4;
+  --secondary-foreground: #24332F;
+  --muted: #F1F6F4;
+  --muted-foreground: #5D6A66;
+  --accent: #F1F6F4;
+  --accent-foreground: #2C5F58;
+  --destructive: #B42318;
+  --border: #D9E3E0;
+  --input: #D9E3E0;
+  --ring: #387A70;
+  --marine: #2C5F58;
+  --etat-erreur: #B42318;
+  --etat-erreur-fond: #FBEAE8;
+  --etat-succes: #1F7A4D;
+  --etat-succes-fond: #E8F5EC;
+  --etat-alerte: #9A5B00;
+  --etat-alerte-fond: #FBF0DC;
+  /* 19/10 : 4 px → 14 px, « tout est trop carré » (Marving). Boutons du site public en pilule. */
+  --radius: 0.875rem;
+  --sidebar: #2C5F58;
+  --sidebar-foreground: #FFFFFF;
+  --sidebar-primary: #387A70;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: color-mix(in oklch, white 10%, transparent);
+  --sidebar-accent-foreground: #FFFFFF;
+  --sidebar-border: color-mix(in oklch, white 12%, transparent);
+  --sidebar-ring: #387A70;
+
+  /* Échelle de titres — ratio 1.333, base 16px, fluide en clamp(). */
+  --texte-titre-1: clamp(3.125rem, 2.125rem + 4vw, 5.625rem);
+  --texte-titre-2: clamp(2.375rem, 2.075rem + 1.2vw, 3.125rem);
+  --texte-titre-3: clamp(1.75rem, 1.5rem + 1vw, 2.375rem);
+  --texte-titre-4: clamp(1.3125rem, 1.1375rem + 0.7vw, 1.75rem);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  /* Le contour du focus clavier (24/10) : net et le même partout. Celui du navigateur, fin, se perdait sur les
+     fonds teintés ; les éléments qui dessinent le leur (champs, cartes de l'agenda) le gardent. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  /* Menu ☰ ouvert : le bandeau qui porte l'en-tête s'isole (« isolate ») et laissait passer devant lui
+     la suite de la page — chiffres, étapes. Il passe au premier plan le temps que le menu est ouvert. */
+  :has(> header details[open]) {
+    z-index: 60;
+  }
+  /* Cases et boutons radio au vert du site (tour du 20/10) : le bleu du navigateur détonnait. */
+  input[type='checkbox'],
+  input[type='radio'] {
+    accent-color: #387a70;
+  }
+  html {
+    @apply font-sans;
+    scroll-behavior: smooth;
+  }
+  /* L'espace du cabinet un cran plus petit à l'écran d'ordinateur (Marving, 28/10 : « tout est un peu trop gros »).
+     Presque toutes les tailles sont en rem : réduire la taille de base réduit tout d'un coup, en proportion, comme
+     un zoom à 85 %. Le site public garde la sienne ; le téléphone aussi, où le texte deviendrait trop petit. */
+  :root {
+    /* La largeur des pages de l'espace du cabinet : 1 200 pixels, quelle que soit la taille de base. */
+    --largeur-page: 75rem;
+  }
+  @media (min-width: 64rem) {
+    :root:has(.espace-cabinet) {
+      font-size: 85%;
+      --largeur-page: calc(75rem / 0.85);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+  }
+}
+
+@layer components {
+  /* Verre dépoli — réservé aux cartes posées sur le hero (règle Chanel : pas
+     de glassmorphism généralisé). `backdrop-filter` n'est pas garanti : le
+     fond translucide reste assez opaque pour tenir le contraste même sans flou. */
+  .verre-sombre {
+    background-color: color-mix(in oklch, var(--marine) 62%, transparent);
+    backdrop-filter: blur(24px) saturate(140%);
+    -webkit-backdrop-filter: blur(24px) saturate(140%);
+    border: 1px solid color-mix(in oklch, white 22%, transparent);
+  }
+
+  /* ── Site public et espace du cabinet : charte « MG Cabinet dentaire », V4 (22/10, maquette-charte-3.pdf) ──
+     Sauge clair et crème, alvéoles en filigrane, sauge profond pour ce qui se touche. */
+  .bouton-principal {
+    border-radius: 999px;
+    /* Blanc lisible sur les deux bouts du dégradé (≥ 4,5:1). */
+    background-image: linear-gradient(135deg, #387a70 0%, #2c5f58 100%);
+    color: #fff;
+    box-shadow: 0 10px 24px -10px color-mix(in oklch, #387a70 70%, transparent);
+    transition: box-shadow 200ms ease, filter 200ms ease, transform 200ms ease;
+  }
+  .bouton-principal:hover {
+    filter: brightness(1.07);
+    box-shadow: 0 14px 30px -10px color-mix(in oklch, #387a70 80%, transparent);
+  }
+  .bouton-principal:active {
+    transform: translateY(1px);
+  }
+  /* Bandes de la charte (V4, 22/10) : sauge clair → sauge, fines alvéoles sauge, texte à l'encre
+     (le blanc ne s'y lit pas). Haut de l'accueil : sous la lueur et les plaques de fond-hero.tsx. */
+  .fond-v2 {
+    background:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='107.4' height='186'%3E%3Cpath d='M53.7 0 L107.4 31 L107.4 93 L53.7 124 L0 93 L0 31 Z M53.7 124 L53.7 186' fill='none' stroke='%23387a70' stroke-opacity='.16' stroke-width='1.2'/%3E%3C/svg%3E"),
+      linear-gradient(135deg, #a9d6cd 0%, #6db7ab 100%);
+    color: var(--color-encre);
+  }
+  /* « Réserver en ligne », urgences : le site public. L'espace du cabinet n'en a plus (Marving, 30/10). */
+  .fond-v2-hexagones {
+    background:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='107.4' height='186'%3E%3Cpath d='M53.7 0 L107.4 31 L107.4 93 L53.7 124 L0 93 L0 31 Z M53.7 124 L53.7 186' fill='none' stroke='%23387a70' stroke-opacity='.16' stroke-width='1.2'/%3E%3C/svg%3E"),
+      linear-gradient(135deg, #a9d6cd 0%, #6db7ab 100%);
+    color: var(--color-encre);
+  }
+  /* Bandeaux de l'espace du cabinet : le même dégradé, sans les alvéoles (Marving, 28/10 et 30/10). */
+  .fond-v2-uni {
+    background: linear-gradient(135deg, #a9d6cd 0%, #6db7ab 100%);
+    color: var(--color-encre);
+  }
+  /* Ce que compte un chiffre du bandeau, éclairé un instant quand on clique dessus (Marving, 28/10). */
+  .cible-eclairee {
+    animation: eclairer 1.8s ease-out;
+  }
+  @keyframes eclairer {
+    0%,
+    35% {
+      background-color: #fdf0d2;
+    }
+  }
+  /* « Accès et horaires » et pied de page de l'accueil : une seule bande, sans couture. La fin
+     d'« Accès » et le début du pied ont la même couleur (#8cc6bb), et les alvéoles sont calées sur le
+     bas d'« Accès » et le haut du pied — leur motif se prolonge d'une section à l'autre. */
+  .fond-acces {
+    background:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='107.4' height='186'%3E%3Cpath d='M53.7 0 L107.4 31 L107.4 93 L53.7 124 L0 93 L0 31 Z M53.7 124 L53.7 186' fill='none' stroke='%23387a70' stroke-opacity='.16' stroke-width='1.2'/%3E%3C/svg%3E") left bottom,
+      linear-gradient(180deg, #a9d6cd 0%, #8cc6bb 100%);
+    color: var(--color-encre);
+  }
+  .fond-pied {
+    padding-top: 4rem;
+    background:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='107.4' height='186'%3E%3Cpath d='M53.7 0 L107.4 31 L107.4 93 L53.7 124 L0 93 L0 31 Z M53.7 124 L53.7 186' fill='none' stroke='%23387a70' stroke-opacity='.16' stroke-width='1.2'/%3E%3C/svg%3E") left top,
+      linear-gradient(180deg, #8cc6bb 0%, #6db7ab 100%);
+    color: var(--color-encre);
+  }
+  /* Barre latérale de l'espace du cabinet : le dégradé et les alvéoles du site, plus petites. */
+  .rail-degrade {
+    background:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='53.7' height='93'%3E%3Cpath d='M26.85 0 L53.7 15.5 L53.7 46.5 L26.85 62 L0 46.5 L0 15.5 Z M26.85 62 L26.85 93' fill='none' stroke='%23387a70' stroke-opacity='.16'/%3E%3C/svg%3E"),
+      linear-gradient(180deg, #a9d6cd 0%, #6db7ab 100%);
+    color: var(--color-encre);
+  }
+  @media (max-width: 1023px) {
+    .rail-degrade {
+      background: linear-gradient(90deg, #a9d6cd 0%, #6db7ab 100%);
+    }
+  }
+  /* Choix retenu dans l'espace du cabinet : cabinet, canal, etc. */
+  .choix-actif {
+    border-color: transparent;
+    background-image: linear-gradient(135deg, #387a70, #2c5f58);
+    color: #fff;
+  }
+  /* Vague de lumière qui traverse le haut de l'accueil toutes les 8 s ; les plaques
+     hexagonales se soulèvent à son passage (fond-hero.tsx, retards calculés pour cette
+     traversée linéaire de 4 s). */
+  .vague-lumiere {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .vague-lumiere::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, transparent 30%, rgb(255 255 255 / 0.12) 44%, rgb(255 255 255 / 0.26) 50%, rgb(255 255 255 / 0.12) 56%, transparent 70%);
+    animation: vague-traverse 8s linear infinite;
+  }
+  .plaque {
+    fill: rgb(255 255 255 / 0.02);
+    stroke: rgb(255 255 255 / 0.08);
+    stroke-width: 1.2;
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: plaque-souleve 8s ease-in-out infinite;
+  }
+  .plaque-icone {
+    transform-box: fill-box;
+    transform-origin: center;
+    filter: drop-shadow(0 0 10px rgb(255 255 255 / 0.5));
+    animation: plaque-icone-souleve 8s ease-in-out infinite;
+  }
+  @keyframes vague-traverse {
+    0% { transform: translateX(-100%); }
+    50%, 100% { transform: translateX(100%); }
+  }
+  @keyframes plaque-souleve {
+    0%, 15%, 100% { transform: none; fill: rgb(255 255 255 / 0.02); stroke: rgb(255 255 255 / 0.08); }
+    7% { transform: translateY(-8px) scale(1.08); fill: rgb(255 255 255 / 0.1); stroke: rgb(255 255 255 / 0.45); }
+  }
+  @keyframes plaque-icone-souleve {
+    0%, 15%, 100% { transform: none; }
+    7% { transform: translateY(-14px) scale(1.12); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .vague-lumiere { display: none; }
+    .plaque, .plaque-icone { animation: none; }
+  }
+  /* Fond blanc cassé à fins hexagones verts (partie « Le cabinet », 19/10). */
+  .fond-hexagones {
+    background-color: #f7f6f2;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='107.4' height='186'%3E%3Cpath d='M53.7 0 L107.4 31 L107.4 93 L53.7 124 L0 93 L0 31 Z M53.7 124 L53.7 186' fill='none' stroke='%23387a70' stroke-opacity='.12' stroke-width='1.2'/%3E%3C/svg%3E");
+  }
+  /* Découpe hexagonale, pointe en haut. */
+  .hexagone {
+    clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+  }
+  /* Sections qui alternent avec le blanc : menthe et ciel, très pâles. */
+  .fond-menthe {
+    background:
+      radial-gradient(900px 420px at 100% 0%, #e6f2ef 0%, transparent 65%),
+      linear-gradient(180deg, #eef6f3 0%, #f3f8f6 100%);
+  }
+  .texte-degrade {
+    background-image: linear-gradient(90deg, #387a70, #387a70);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .carte-douce {
+    border-radius: 1.75rem;
+    background-color: #fff;
+    border: 1px solid #e0ebe8;
+    box-shadow: 0 24px 48px -30px color-mix(in oklch, #2c5f58 45%, transparent);
+  }
+  /* Surtitres et petits accents : le sauge profond, lisible sur fond clair (5,0:1). */
+  .accent-vert {
+    color: #387a70;
+  }
+  /* Ombre douce, teintée de marine — réservée aux cartes superposées. */
+  .ombre-douce {
+    box-shadow:
+      0 1px 2px color-mix(in oklch, var(--marine) 6%, transparent),
+      0 12px 32px -12px color-mix(in oklch, var(--marine) 22%, transparent);
+  }
+
+  /* Champs natifs (input, select, textarea) : 16px pour éviter le zoom
+     Safari iOS, hauteur 44px, focus visible distinct du survol. */
+  .champ {
+    display: block;
+    width: 100%;
+    height: 2.75rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background-color: var(--background);
+    padding-inline: 0.875rem;
+    font-size: 1rem;
+    color: var(--foreground);
+    transition: border-color 150ms ease, box-shadow 150ms ease;
+  }
+  textarea.champ {
+    height: auto;
+    min-height: 7rem;
+    padding-block: 0.625rem;
+  }
+  .champ::placeholder {
+    color: var(--muted-foreground);
+  }
+  .champ:hover {
+    border-color: color-mix(in oklch, var(--border), var(--foreground) 20%);
+  }
+  .champ:focus-visible {
+    outline: none;
+    border-color: var(--ring);
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 35%, transparent);
+  }
+  .champ[aria-invalid="true"] {
+    border-color: var(--etat-erreur);
+  }
+  .champ[aria-invalid="true"]:focus-visible {
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--etat-erreur) 25%, transparent);
+  }
+  .champ:disabled {
+    background-color: var(--muted);
+    color: var(--muted-foreground);
+    cursor: not-allowed;
+  }
+
+  .etiquette {
+    display: block;
+    margin-bottom: 0.375rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--foreground);
+  }
+
+  /* Flèche identique sur tout lien d'action, décalée de 3px au survol. */
+  .lien-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-weight: 600;
+  }
+  .lien-action::after {
+    content: "→";
+    display: inline-block;
+    transition: transform 200ms ease;
+  }
+  .lien-action:hover::after {
+    transform: translateX(3px);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .lien-action:hover::after {
+      transform: none;
+    }
+  }
+
+  .bande-sombre {
+    background-color: var(--marine);
+    color: #FFFFFF;
+  }
+  .bande-claire {
+    background-color: var(--secondary);
+    color: var(--foreground);
+  }
+
+  .coupe-diagonale {
+    clip-path: polygon(0 3.5%, 100% 0, 100% 96.5%, 0 100%);
+  }
+
+  /* Filtre en pilule, plein quand actif — via une radio/checkbox masquée
+     (:has) ou [aria-current] posé par le serveur. */
+  .pastille {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    height: 2.25rem;
+    padding-inline: 1rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background-color: var(--background);
+    color: var(--foreground);
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+  }
+  .pastille:hover {
+    border-color: var(--primary);
+  }
+  .pastille:has(input:checked),
+  .pastille[aria-current="true"],
+  .pastille[aria-current="page"],
+  .pastille[aria-current="step"] {
+    background-color: var(--primary);
+    border-color: var(--primary);
+    color: var(--primary-foreground);
+  }
+  .pastille:has(input:focus-visible) {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  .pastille input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+
+  .chiffres {
+    font-variant-numeric: tabular-nums;
+  }
+
+  @keyframes revele {
+    from {
+      opacity: 0;
+      transform: translateY(16px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  .revele-1,
+  .revele-2,
+  .revele-3,
+  .revele-4 {
+    animation: revele 600ms ease-out both;
+  }
+  .revele-1 {
+    animation-delay: 0ms;
+  }
+  .revele-2 {
+    animation-delay: 250ms;
+  }
+  .revele-3 {
+    animation-delay: 450ms;
+  }
+  .revele-4 {
+    animation-delay: 650ms;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .revele-1,
+    .revele-2,
+    .revele-3,
+    .revele-4 {
+      animation: none;
+      opacity: 1;
+      transform: none;
+    }
+  }
+}

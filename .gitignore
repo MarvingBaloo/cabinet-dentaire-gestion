@@ -1,0 +1,68 @@
+# Dépendances
+node_modules/
+.pnp
+.pnp.js
+
+# Build
+.next/
+.next-e2e/
+# Réécrit par Next à chaque lancement (.next/types en construction, .next/dev/types en développement) ;
+# `npx next typegen` le recrée après un clone, comme le fait la CI.
+next-env.d.ts
+out/
+build/
+dist/
+
+# Environnement — aucune variable ne doit entrer dans le dépôt
+.env
+.env.*
+!.env.example
+
+# Données de santé : aucun dump, export ou fixture réelle dans le dépôt (HDS)
+*.dump
+*.sql.gz
+/dumps/
+/exports/
+
+# Tests
+coverage/
+/playwright-report/
+/test-results/
+/blob-report/
+/playwright/.cache/
+
+# Divers
+.DS_Store
+*.pem
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.vscode/*
+!.vscode/extensions.json
+# Partagé volontairement : force VS Code à utiliser le TypeScript du projet.
+# Sans lui, l'éditeur signale des types Prisma absents que tsc trouve très bien.
+!.vscode/settings.json
+.idea/
+
+# Prisma
+prisma/*.db
+prisma/*.db-journal
+
+# TypeScript
+*.tsbuildinfo
+
+# Secrets de la base de développement, posés à la main sur le NAS
+docker/db.env
+
+# Secrets de l’instance de démonstration, posés à la main sur le NAS
+docker/app.env
+
+# Vignettes générées par le Synology
+@eaDir/
+
+# Projet Vercel relié localement (vercel link)
+.vercel
+
+# Parcours Playwright : sessions et données de la passe en cours
+/e2e/.auth/
+/e2e/.etat.json

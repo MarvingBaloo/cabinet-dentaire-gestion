@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  verifier:
+    runs-on: ubuntu-latest
+
+    # Les tests sont des tests d'INTÉGRATION : ils vérifient des garanties que
+    # seul PostgreSQL peut fournir (journal d'audit non modifiable, absence de
+    # droits DDL). Les faire tourner sans base reviendrait à ne pas les faire
+    # tourner du tout. D'où un vrai serveur, et jamais de base mockée.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: cabinet_owner
+          POSTGRES_PASSWORD: ci_only
+          POSTGRES_DB: cabinet_dentaire
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U cabinet_owner -d cabinet_dentaire"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+    env:
+      DATABASE_URL: postgresql://cabinet_app:ci_only@localhost:5432/cabinet_dentaire
+      DIRECT_DATABASE_URL: postgresql://cabinet_owner:ci_only@localhost:5432/cabinet_dentaire
+      CABINET_APP_PASSWORD: ci_only
+      # Valeurs d'intégration continue, sur une base jetable. Aucune ne vaut en
+      # production, où elles viennent du gestionnaire de secrets de l'hébergeur.
+      SESSION_IDLE_TIMEOUT_MINUTES: '15'
+      SESSION_COOKIE_SECURE: 'false'
+      AUDIT_RETENTION_MONTHS: '36'
+      NEXT_TELEMETRY_DISABLED: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      # `npm ci` ne déclenche aucun postinstall Prisma et `migrate deploy` ne
+      # génère rien : sans cette étape, le client est absent et l'échec survient
+      # plus loin, au seed, sous la forme d'un module introuvable.
+      - run: npx prisma generate
+
+      # Next génère les types de route (LayoutProps, PageProps) dans .next/types,
+      # qui n'est pas versionné. Sans cette étape, `tsc` échoue sur un clone
+      # neuf — en CI comme sur le poste d'un nouveau contributeur.
+      - run: npx next typegen
+
+      - name: Créer le rôle applicatif
+        run: |
+          PGPASSWORD=ci_only psql -h localhost -U cabinet_owner -d cabinet_dentaire \
+            -v ON_ERROR_STOP=1 -c "CREATE ROLE cabinet_app LOGIN PASSWORD 'ci_only';"
+
+      - run: npx prisma migrate deploy
+
+      # Sans cette étape, le schéma serait en place et les protections absentes,
+      # sans qu'aucune erreur ne le signale — et les tests de sécurité
+      # échoueraient pour la bonne raison. C'est voulu : la CI doit casser si
+      # quelqu'un oublie de rejouer ce SQL après une migration.
+      - name: Privilèges et verrou du journal d'audit
+        run: npm run db:security
+
+      - run: npm run db:seed
+
+      - run: npm run lint
+      - run: npm run type-check
+      - run: npm test
+      - run: npm run build

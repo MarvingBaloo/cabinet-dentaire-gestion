@@ -1,0 +1,2 @@
+# Next.js sert ce dossier tel quel. Vide pour l’instant, mais il doit exister :
+# git ne versionne pas un dossier vide, et le Dockerfile le copie.
